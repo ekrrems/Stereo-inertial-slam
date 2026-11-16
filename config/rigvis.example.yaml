@@ -1,0 +1,14 @@
+%YAML:1.0
+---
+# RigVis run configuration.
+# Copy this file to config/rigvis.yaml (git-ignored) and set your own paths:
+#   cp config/rigvis.example.yaml config/rigvis.yaml
+# Or pass another file: ./rigvis_dataset_runner my_config.yaml
+
+# KITTI raw *_sync drive folder. Its parent (day) folder must contain
+# calib_cam_to_cam.txt, calib_imu_to_velo.txt and calib_velo_to_cam.txt.
+dataset_path: "/path/to/KITTI_RAW/2011_10_03/2011_10_03_drive_0027_sync"
+
+# Optional: *_extract drive folder with 100 Hz OXTS/IMU data.
+# Empty = use the 10 Hz OXTS data from the *_sync folder.
+imu_path: ""

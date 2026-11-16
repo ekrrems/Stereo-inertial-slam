@@ -1,0 +1,4 @@
+1. When turning there is an issue with the implementation there
+2. Calculate the turning points and how many projection is behind the camera
+3. Solve the Parallel computing issue there
+4. Spend 3hour on this problem there in the morning

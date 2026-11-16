@@ -1,0 +1,19 @@
+# Build output
+build/
+conanfile.py
+
+# Machine-specific settings (copy config/rigvis.example.yaml to create it)
+config/rigvis.yaml
+
+# Python helper scripts (not needed to build; tools/rigvis_evaluate.cpp IS needed)
+tools/*.py
+
+# Run outputs
+*.ply
+*.png
+*.tar
+frame_stats.csv
+evaluation_results.csv
+keyframes.csv
+trajectory_*.txt
+ba_debug/
