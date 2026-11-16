@@ -12,3 +12,17 @@ dataset_path: "/path/to/KITTI_RAW/2011_10_03/2011_10_03_drive_0027_sync"
 # Optional: *_extract drive folder with 100 Hz OXTS/IMU data.
 # Empty = use the 10 Hz OXTS data from the *_sync folder.
 imu_path: ""
+
+# Optional: added to every IMU timestamp. The OXTS clock lags the cameras;
+# -0.05 s fits 2011_10_03_drive_0027 (gyro vs VO rotation agree best).
+imu_time_offset_s: -0.05
+
+# Optional: VO + IMU fusion (ESKF) noise. Delete the block to use the defaults.
+# IMU values are continuous-time densities; VO values are 1 sigma per frame.
+vio:
+  gyro_noise: 0.005         # rad/s/sqrt(Hz)
+  accel_noise: 0.2          # m/s^2/sqrt(Hz)  (~0.5 with the 10 Hz sync data)
+  gyro_bias_walk: 0.0001    # rad/s^2/sqrt(Hz)
+  accel_bias_walk: 0.001    # m/s^3/sqrt(Hz)
+  vo_rotation_std_deg: 0.2
+  vo_position_std_m: 0.03

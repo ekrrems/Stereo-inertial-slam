@@ -156,14 +156,17 @@ namespace fs = std::filesystem;
 		RigVis::ImuSample sample;
 		sample.timestamp_s = timestamp_s;
 
-		// KITTI OXTS:
-		// af, al, au at indices 14, 15, 16.
+		// KITTI OXTS: ax, ay, az (11-13) and wx, wy, wz (17-19) are in the IMU
+		// BODY frame, the frame calib_imu_to_velo.txt refers to (x forward,
+		// y left, z up, gravity included: az ~ +9.8 at rest).
+		// af/al/au and wf/wl/wu (14-16, 20-22) are in a different, vehicle-
+		// aligned frame; with them the filter's tilt is pulled the wrong way
+		// (tested on frames 0-160: r_rel 2.7 instead of 1.1 deg/100 m).
 		sample.acceleration =
-			Eigen::Vector3d(values[14], values[15], values[16]);
+			Eigen::Vector3d(values[11], values[12], values[13]);
 
-		// wf, wl, wu at indices 20, 21, 22.
 		sample.angularVel =
-			Eigen::Vector3d(values[20], values[21], values[22]);
+			Eigen::Vector3d(values[17], values[18], values[19]);
 
 		return sample;
 	}
@@ -173,7 +176,8 @@ namespace fs = std::filesystem;
 namespace RigVis
 {
 
-	DataLoader::DataLoader(const std::string& dataset_path, const std::string& imu_path)
+	DataLoader::DataLoader(const std::string& dataset_path, const std::string& imu_path, double imu_time_offset_s)
+		: imu_time_offset_s_(imu_time_offset_s)
 	{
 		const fs::path drive_path(dataset_path);
 
@@ -293,6 +297,36 @@ namespace RigVis
 				}
 			}
 		}
+
+		// IMU -> rectified left camera, chained from the KITTI calibration files:
+		//   x_velo = T_velo_imu x_imu,  x_cam0 = T_cam0_velo x_velo,  x_rect = R_rect_00 x_cam0
+		const auto rect_iterator = values.find("R_rect_00");
+		const fs::path imu_to_velo_path = day_path / "calib_imu_to_velo.txt";
+		const fs::path velo_to_cam_path = day_path / "calib_velo_to_cam.txt";
+		if (rect_iterator != values.end() && rect_iterator->second.size() == 9 && fs::exists(imu_to_velo_path) &&
+			fs::exists(velo_to_cam_path)) {
+			auto rigid = [](const std::unordered_map<std::string, std::vector<double>>& file) {
+				Eigen::Isometry3d transform = Eigen::Isometry3d::Identity();
+				const auto& R = file.at("R");
+				const auto& T = file.at("T");
+				for (int row = 0; row < 3; ++row) {
+					for (int column = 0; column < 3; ++column) {
+						transform.linear()(row, column) = R[static_cast<std::size_t>(row * 3 + column)];
+					}
+					transform.translation()(row) = T[static_cast<std::size_t>(row)];
+				}
+				return transform;
+			};
+			Eigen::Isometry3d rectFromCam0 = Eigen::Isometry3d::Identity();
+			for (int row = 0; row < 3; ++row) {
+				for (int column = 0; column < 3; ++column) {
+					rectFromCam0.linear()(row, column) = rect_iterator->second[static_cast<std::size_t>(row * 3 + column)];
+				}
+			}
+			calibration_.camera_from_imu = rectFromCam0 * rigid(readKittiCalibration(velo_to_cam_path)) *
+										   rigid(readKittiCalibration(imu_to_velo_path));
+			calibration_.has_imu_extrinsics = true;
+		}
 	}
 
 	void DataLoader::loadStereoRecords(const fs::path& drive_path)
@@ -404,7 +438,7 @@ namespace RigVis
 
 		for (std::size_t index = 0; index < imu_files.size(); ++index) {
 			imu_samples_.push_back(
-				readOxtsSample(imu_files[index], timestamps[index]));
+				readOxtsSample(imu_files[index], timestamps[index] + imu_time_offset_s_));
 		}
 	}
 

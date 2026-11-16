@@ -31,6 +31,7 @@ find_package(Ceres REQUIRED)
 add_library(rigvis
     src/DataLoader.cpp
 	src/Estimator.cpp
+	src/VisualInertialFusion.cpp
 	src/TrajectoryViewer.cpp
 	src/StereoFrontend.cpp
 	src/MapViewer.cpp

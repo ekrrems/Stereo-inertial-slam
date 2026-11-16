@@ -13,7 +13,11 @@ tools/*.py
 *.png
 *.tar
 frame_stats.csv
+fusion_stats.csv
 evaluation_results.csv
 keyframes.csv
 trajectory_*.txt
 ba_debug/
+
+# README images are committed
+!docs/images/*.png

@@ -70,6 +70,12 @@ namespace RigVis
 		bool has_color_camera = false;
 		Eigen::Matrix<double, 3, 4> color_projection =
 			Eigen::Matrix<double, 3, 4>::Zero();
+
+		// IMU (OXTS) frame -> rectified left camera frame: x_cam = camera_from_imu * x_imu.
+		// From calib_imu_to_velo.txt, calib_velo_to_cam.txt and R_rect_00.
+		bool has_imu_extrinsics = false;
+		Eigen::Isometry3d camera_from_imu =
+			Eigen::Isometry3d::Identity();
 	};
 
 }  // namespace RigVis

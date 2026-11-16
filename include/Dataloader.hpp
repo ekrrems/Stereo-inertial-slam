@@ -19,7 +19,10 @@ namespace RigVis
 			// dataset_path: the exact *_sync drive directory.
 			// imu_path: optional *_extract drive directory with 100 Hz OXTS/IMU data.
 			//           Empty = use the 10 Hz OXTS data inside the *_sync directory.
-			explicit DataLoader(const std::string& dataset_path, const std::string& imu_path = "");
+			// imu_time_offset_s is added to every IMU timestamp (the OXTS clock lags
+			// the cameras; about -0.05 s on 2011_10_03_drive_0027, see config).
+			explicit DataLoader(const std::string& dataset_path, const std::string& imu_path = "",
+								double imu_time_offset_s = 0.0);
 
 			// Returns false after every IMU sample and stereo pair is consumed.
 			bool next(SensorEvent& event);
@@ -54,6 +57,7 @@ namespace RigVis
 
 			std::size_t next_stereo_index_ = 0;
 			std::size_t next_imu_index_ = 0;
+			double imu_time_offset_s_ = 0.0;
 	};
 
 }  // namespace RigVis
