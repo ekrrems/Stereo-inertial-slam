@@ -145,3 +145,7 @@ config/rigvis.example.yaml
 - Bag-of-words loop detection.
 - Semantic map: per-pixel segmentation lifted into the 3D map, queryable objects.
 - Gazebo / PX4 drone simulation and multi-drone map merging.
+
+## License
+
+MIT, see [LICENSE](LICENSE). The KITTI dataset is not part of this repository and has its own license (CC BY-NC-SA 3.0).
