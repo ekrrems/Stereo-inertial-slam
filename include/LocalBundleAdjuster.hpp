@@ -20,12 +20,26 @@
 #include <cstddef>
 #include <vector>
 
+#include <Eigen/Core>
+#include <Eigen/Geometry>
+
 #include "types.hpp"
 
 namespace RigVis
 {
 	struct Keyframe;
 	struct SparseMapPoint;
+
+	// Extra relative-pose measurement between two keyframes (from dense ICP):
+	//   aFromB = T_A<-B,  information = 6x6 for [rotation (rad); translation (m)],
+	//   the error is taken in A's frame: e = Log(T_est * T_meas^-1).
+	struct RelativePoseConstraint
+	{
+		std::size_t keyframeA = 0;
+		std::size_t keyframeB = 0;
+		Eigen::Isometry3d aFromB = Eigen::Isometry3d::Identity();
+		Eigen::Matrix<double, 6, 6> information = Eigen::Matrix<double, 6, 6>::Identity();
+	};
 
 	struct BundleAdjustmentOptions
 	{
@@ -35,6 +49,7 @@ namespace RigVis
 		int iterationsSecondPass = 10;          // after outlier removal
 		double chi2Stereo = 7.815;              // chi^2, 3 DoF, 95 %
 		double chi2Mono = 5.991;                // chi^2, 2 DoF, 95 %
+		double chi2Relative = 12.592;           // chi^2, 6 DoF, 95 % (ICP edges)
 		int numThreads = 4;
 	};
 
@@ -46,6 +61,8 @@ namespace RigVis
 		std::size_t points = 0;
 		std::size_t observations = 0;
 		std::size_t outliersRemoved = 0;
+		std::size_t relativeConstraints = 0;    // ICP edges used
+		std::size_t relativeOutliers = 0;       // ICP edges rejected by the chi^2 test
 
 		// Ceres cost = 0.5 * sum of (robustified) squared normalized residuals.
 		double initialCost = 0.0;
@@ -66,5 +83,6 @@ namespace RigVis
 	BundleAdjustmentSummary runLocalBundleAdjustment(std::vector<Keyframe>& keyframes,
 													 std::vector<SparseMapPoint>& mapPoints,
 													 const StereoCalibration& calibration,
-													 const BundleAdjustmentOptions& options);
+													 const BundleAdjustmentOptions& options,
+													 const std::vector<RelativePoseConstraint>* relativeConstraints = nullptr);
 }

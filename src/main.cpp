@@ -93,6 +93,9 @@ int main(int argc, char** argv)
 
 	// RigVis::TrajectoryViewer viewer{};
 	RigVis::StereoFrontend frontend{loader.calibration()};
+	if (!config["dense_icp"].empty()) frontend.setDenseIcp(static_cast<int>(config["dense_icp"]) != 0);  // default off
+	if (!config["dense_icp_inlier_gate"].empty())
+		frontend.setDenseIcpInlierGate(static_cast<std::size_t>(static_cast<int>(config["dense_icp_inlier_gate"])));
 	RigVis::MapViewer mapViewer;
 	std::size_t imuCount = 0;
 
@@ -197,6 +200,7 @@ int main(int argc, char** argv)
 		finalFile.precision(9);
 		for (const auto& pose : finalTrajectory) RigVis::writeKittiPose(finalFile, pose);
 	}
+	frontend.printIcpSummary();
 	std::cout << "Loops closed: " << frontend.loopsClosed() << " | final trajectory saved to "
 			  << finalTrajectoryPath << '\n';
 

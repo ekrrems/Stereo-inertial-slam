@@ -40,6 +40,7 @@ add_library(rigvis
 	src/PoseGraph.cpp
 	src/LoopClosing.cpp
 	src/DenseMapper.cpp
+	src/IcpAligner.cpp
 	src/MapExport.cpp
 )
 

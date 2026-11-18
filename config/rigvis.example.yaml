@@ -26,3 +26,9 @@ vio:
   accel_bias_walk: 0.001    # m/s^3/sqrt(Hz)
   vo_rotation_std_deg: 0.2
   vo_position_std_m: 0.03
+
+# Experimental: dense ICP between neighbouring keyframe clouds (point-to-plane),
+# computed on a worker thread and added to bundle adjustment as relative-pose edges.
+# Only used for keyframes with weak feature tracking (fewer PnP inliers than the gate).
+dense_icp: 0
+dense_icp_inlier_gate: 150

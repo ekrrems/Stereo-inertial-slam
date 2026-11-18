@@ -3,6 +3,8 @@
 
 #include <cstddef>
 #include <deque>
+#include <future>
+#include <map>
 #include <unordered_map>
 #include <cstdint>
 #include <string>
@@ -17,6 +19,7 @@
 
 #include "DenseMapper.hpp"
 #include "LocalBundleAdjuster.hpp"
+#include "IcpAligner.hpp"
 #include "types.hpp"
 
 namespace RigVis
@@ -156,6 +159,7 @@ namespace RigVis
 		std::size_t associatedAfterPose = 0;  // extra matches from the tight second search
 		std::size_t culledPoints = 0;         // points removed at this keyframe
 		double denseMilliseconds = 0.0;       // SGBM dense cloud time (keyframes only)
+		std::size_t icpEdgesInBundleAdjustment = 0;  // dense ICP edges used by this keyframe's local BA
 
 		// Loop closure (only on keyframe frames).
 		long loopCandidate = -1;              // verified old keyframe id, -1 = none
@@ -220,6 +224,13 @@ namespace RigVis
 			// Per keyframe: image file name, position, orientation (Metashape reference import).
 			bool exportKeyframesCsv(const std::string& path, bool zUp = true) const;
 			void setDenseMapping(bool enabled) { denseOptions_.enabled = enabled; }
+
+			// Dense ICP: align each new dense keyframe cloud with the previous one on a
+			// worker thread; the result enters local/global BA as a relative-pose edge.
+			void setDenseIcp(bool enabled) { useDenseIcp_ = enabled; }
+			void setDenseIcpInlierGate(std::size_t inliers) { icpOnlyBelowInliers_ = inliers; }
+			// Waits for the running ICP jobs and prints how many were used / rejected and why.
+			void printIcpSummary();
 
 			// Covisibility graph: keyframes sharing the most map points with keyframeId,
 			// strongest first, only edges with at least minWeight shared points.
@@ -344,6 +355,30 @@ namespace RigVis
 			// ---- Dense map: one cloud per Nth keyframe, in that keyframe's camera frame
 			DenseCloudOptions denseOptions_;
 			std::unordered_map<std::size_t, DenseCloud> denseClouds_;
+
+			// ---- Dense ICP (IcpAligner), computed in parallel to tracking
+			struct PendingIcp
+			{
+				std::size_t keyframeA = 0;   // target (older)
+				std::size_t keyframeB = 0;   // source (new)
+				bool weakTracking = false;   // keyframe B was tracked with few PnP inliers
+				std::future<IcpResult> result;
+			};
+			void launchDenseIcp(std::size_t newKeyframeId);
+			void collectFinishedIcp(bool wait = false);
+			bool useDenseIcp_ = false;  // config: dense_icp: 1
+			// ICP backs up weak tracking: its edge enters BA only if the new keyframe had
+			// fewer PnP inliers than this (0 = always). On KITTI, SGBM-cloud ICP is less
+			// accurate (~10-20 cm between keyframes) than the feature tracking (~5-8 cm),
+			// so it only helps where features are scarce (blank walls, low texture).
+			std::size_t icpOnlyBelowInliers_ = 150;
+			IcpOptions icpOptions_;
+			std::deque<PendingIcp> pendingIcp_;
+			std::vector<RelativePoseConstraint> icpConstraints_;
+			std::size_t icpLaunched_ = 0;
+			double icpMillisecondsSum_ = 0.0;
+			double icpRmseSum_ = 0.0;
+			std::map<std::string, std::size_t> icpRejections_;
 			cv::Mat distortionCoefficients_;
 
 			bool frontendInitialized_ = false;

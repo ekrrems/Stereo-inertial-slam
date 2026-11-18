@@ -233,7 +233,9 @@ namespace RigVis
 		if (globalBundleAdjustmentAfterLoop_) {
 			BundleAdjustmentOptions options = localBundleAdjustmentOptions_;
 			options.windowKeyframes = n;
-			const BundleAdjustmentSummary global = runLocalBundleAdjustment(keyframes_, mapPoints_, calibration_, options);
+			collectFinishedIcp();
+			const BundleAdjustmentSummary global =
+				runLocalBundleAdjustment(keyframes_, mapPoints_, calibration_, options, &icpConstraints_);
 			if (global.ran) {
 				worldFromCamera_ = keyframes_.back().worldFromCamera;
 				std::cout << std::fixed << std::setprecision(2) << "Global BA: " << global.points << " points, "

@@ -8,6 +8,8 @@
 #include <unordered_set>
 
 #include <ceres/ceres.h>
+#include <ceres/rotation.h>
+#include <Eigen/Cholesky>
 #include <Eigen/Geometry>
 
 #include "StereoFrontend.hpp"  // Keyframe, SparseMapPoint, Observation
@@ -95,6 +97,55 @@ namespace RigVis
 			Intrinsics k_;
 		};
 
+		// Relative pose between two keyframes (dense ICP), poses as T_cw (camera-from-world):
+		//   T_A<-B = T_cA * T_cB^-1,   E = T_A<-B * T_meas^-1,   e = (Log R_E, t_E)
+		//   residual = L e  with  L^T L = information  ->  ||residual||^2 = e^T Info e
+		class RelativePoseFactor
+		{
+		public:
+			RelativePoseFactor(const Eigen::Isometry3d& aFromB, const Eigen::Matrix<double, 6, 6>& information)
+				: measuredInverse_(aFromB.inverse())
+			{
+				sqrtInformation_ = information.llt().matrixU();
+			}
+
+			template <typename T>
+			bool operator()(const T* const qA, const T* const tA, const T* const qB, const T* const tB, T* residual) const
+			{
+				const Eigen::Map<const Eigen::Quaternion<T>> rotationA(qA), rotationB(qB);
+				const Eigen::Map<const Eigen::Matrix<T, 3, 1>> translationA(tA), translationB(tB);
+				// T_cB^-1
+				const Eigen::Quaternion<T> rotationBInv = rotationB.conjugate();
+				const Eigen::Matrix<T, 3, 1> translationBInv = -(rotationBInv * translationB);
+				// T_A<-B
+				const Eigen::Quaternion<T> rotationAB = rotationA * rotationBInv;
+				const Eigen::Matrix<T, 3, 1> translationAB = rotationA * translationBInv + translationA;
+				// E = T_A<-B * T_meas^-1
+				const Eigen::Quaternion<T> qm(measuredInverse_.linear().template cast<T>());
+				const Eigen::Matrix<T, 3, 1> tm = measuredInverse_.translation().template cast<T>();
+				const Eigen::Quaternion<T> rotationE = rotationAB * qm;
+				const Eigen::Matrix<T, 3, 1> translationE = rotationAB * tm + translationAB;
+
+				const T quaternionWxyz[4] = {rotationE.w(), rotationE.x(), rotationE.y(), rotationE.z()};
+				Eigen::Matrix<T, 6, 1> error;
+				ceres::QuaternionToAngleAxis(quaternionWxyz, error.data());
+				error.template tail<3>() = translationE;
+				Eigen::Map<Eigen::Matrix<T, 6, 1>> out(residual);
+				out = sqrtInformation_.template cast<T>() * error;
+				return true;
+			}
+
+			static ceres::CostFunction* create(const Eigen::Isometry3d& aFromB, const Eigen::Matrix<double, 6, 6>& information)
+			{
+				return new ceres::AutoDiffCostFunction<RelativePoseFactor, 6, 4, 3, 4, 3>(
+					new RelativePoseFactor(aFromB, information));
+			}
+
+		private:
+			Eigen::Isometry3d measuredInverse_;
+			Eigen::Matrix<double, 6, 6> sqrtInformation_;
+		};
+
 		// Bookkeeping for one residual block, needed for the outlier test.
 		struct ResidualInfo
 		{
@@ -121,7 +172,8 @@ namespace RigVis
 	BundleAdjustmentSummary runLocalBundleAdjustment(std::vector<Keyframe>& keyframes,
 													 std::vector<SparseMapPoint>& mapPoints,
 													 const StereoCalibration& calibration,
-													 const BundleAdjustmentOptions& options)
+													 const BundleAdjustmentOptions& options,
+													 const std::vector<RelativePoseConstraint>* relativeConstraints)
 	{
 		const auto startTime = std::chrono::steady_clock::now();
 		BundleAdjustmentSummary summary;
@@ -177,6 +229,20 @@ namespace RigVis
 		for (std::size_t k = firstFree; k < keyframes.size(); ++k) addPose(k);
 		for (const std::size_t k : fixedKeyframes) addPose(k);
 
+		// ICP edges that touch the window. An endpoint outside the window joins as
+		// a fixed pose. Added now, before any pointer into the pose arrays is taken.
+		std::vector<const RelativePoseConstraint*> usedConstraints;
+		if (relativeConstraints) {
+			for (const RelativePoseConstraint& c : *relativeConstraints) {
+				if (c.keyframeA >= keyframes.size() || c.keyframeB >= keyframes.size()) continue;
+				if (!isFree(c.keyframeA) && !isFree(c.keyframeB)) continue;
+				for (const std::size_t k : {c.keyframeA, c.keyframeB}) {
+					if (!isFree(k) && !poseSlot.count(k)) { fixedKeyframes.insert(k); addPose(k); }
+				}
+				usedConstraints.push_back(&c);
+			}
+		}
+
 		std::vector<std::array<double, 3>> points(pointIndices.size());
 		for (std::size_t i = 0; i < pointIndices.size(); ++i) {
 			const Eigen::Vector3d& position = mapPoints[pointIndices[i]].positionWorld;
@@ -231,6 +297,17 @@ namespace RigVis
 			}
 		}
 		if (residualInfos.empty()) return summary;
+
+		const double huberRelative = std::sqrt(options.chi2Relative);
+		std::vector<ceres::ResidualBlockId> relativeIds;
+		for (const RelativePoseConstraint* c : usedConstraints) {
+			const std::size_t a = poseSlot.at(c->keyframeA), b = poseSlot.at(c->keyframeB);
+			relativeIds.push_back(problem.AddResidualBlock(RelativePoseFactor::create(c->aFromB, c->information),
+														   new ceres::HuberLoss(huberRelative), quaternions[a].data(),
+														   translations[a].data(), quaternions[b].data(),
+														   translations[b].data()));
+		}
+		summary.relativeConstraints = relativeIds.size();
 
 		// Quaternions live on a manifold: 4 numbers, 3 degrees of freedom, stays unit length.
 		for (auto& [keyframeIndex, slot] : poseSlot) {
@@ -290,6 +367,11 @@ namespace RigVis
 		}
 		for (const ResidualInfo* info : outliers) problem.RemoveResidualBlock(info->id);
 		summary.outliersRemoved = outliers.size();
+		for (const ceres::ResidualBlockId id : relativeIds) {   // same test for the ICP edges
+			double cost = 0.0;
+			problem.EvaluateResidualBlock(id, false, &cost, nullptr, nullptr);
+			if (2.0 * cost > options.chi2Relative) { problem.RemoveResidualBlock(id); ++summary.relativeOutliers; }
+		}
 
 		// ---- 6. Second pass without the outliers.
 		solverOptions.max_num_iterations = options.iterationsSecondPass;

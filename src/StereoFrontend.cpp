@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
+#include <numeric>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -27,7 +28,7 @@ namespace RigVis
 			   "path,keyframe,kf_reason,"
 			   "ba_ran,ba_ms,ba_outliers,ba_rms_before,ba_rms_after,"
 			   "match_method,local_keyframes,associated_after_pose,culled_points,"
-			   "loop_candidate,loop_inliers,loop_corrected,loop_correction_m,dense_ms";
+			   "loop_candidate,loop_inliers,loop_corrected,loop_correction_m,dense_ms,icp_edges";
 	}
 
 	std::string frameStatsCsvRow(const FrameStats& s)
@@ -50,7 +51,7 @@ namespace RigVis
 			<< s.bundleAdjustmentRmsAfter << ',' << s.matchMethod << ',' << s.localKeyframes << ','
 			<< s.associatedAfterPose << ',' << s.culledPoints << ','
 			<< s.loopCandidate << ',' << s.loopInliers << ',' << (s.loopCorrected ? 1 : 0) << ',' << s.loopCorrectionMeters
-			<< ',' << std::setprecision(1) << s.denseMilliseconds;
+			<< ',' << std::setprecision(1) << s.denseMilliseconds << ',' << s.icpEdgesInBundleAdjustment;
 		return row.str();
 	}
 
@@ -229,6 +230,76 @@ namespace RigVis
 		std::cout << "----------------------------------------------------------\n";
 	}
 
+	// ------------------------------------------------ dense ICP (parallel)
+
+	// The new keyframe's dense cloud vs the previous keyframe that has one.
+	// Copies of both clouds and the tracker's relative pose go to a worker
+	// thread, so tracking does not wait; the result is picked up at a later
+	// local BA (the new keyframe stays in the BA window for ~10 keyframes).
+	void StereoFrontend::launchDenseIcp(std::size_t newKeyframeId)
+	{
+		const auto source = denseClouds_.find(newKeyframeId);
+		if (source == denseClouds_.end() || source->second.pointsCamera.empty()) return;
+		for (std::size_t back = 1; back <= 2 * std::max<std::size_t>(1, denseOptions_.everyNthKeyframe) &&
+								   back <= newKeyframeId;
+			 ++back) {
+			const std::size_t a = newKeyframeId - back;
+			const auto target = denseClouds_.find(a);
+			if (target == denseClouds_.end() || target->second.pointsCamera.empty()) continue;
+
+			const Eigen::Isometry3d initial = keyframes_[a].worldFromCamera.inverse() * keyframes_[newKeyframeId].worldFromCamera;
+			PendingIcp job;
+			job.keyframeA = a;
+			job.keyframeB = newKeyframeId;
+			job.weakTracking = icpOnlyBelowInliers_ == 0 || stats_.localInliers < icpOnlyBelowInliers_;
+			job.result = std::async(std::launch::async, alignPointToPlane, target->second.pointsCamera,
+									source->second.pointsCamera, initial, icpOptions_);  // arguments are copied
+			pendingIcp_.push_back(std::move(job));
+			++icpLaunched_;
+			return;
+		}
+	}
+
+	void StereoFrontend::collectFinishedIcp(bool wait)
+	{
+		for (auto it = pendingIcp_.begin(); it != pendingIcp_.end();) {
+			if (!wait && it->result.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+				++it;
+				continue;
+			}
+			const IcpResult r = it->result.get();
+			icpMillisecondsSum_ += r.milliseconds;
+			if (r.valid && !it->weakTracking) {
+				++icpRejections_["not needed (tracking was strong)"];
+			} else if (r.valid) {
+				RelativePoseConstraint c;
+				c.keyframeA = it->keyframeA;
+				c.keyframeB = it->keyframeB;
+				c.aFromB = r.targetFromSource;
+				c.information = r.information;
+				icpConstraints_.push_back(c);
+				icpRmseSum_ += r.rmse;
+			} else {
+				++icpRejections_[r.reason];
+			}
+			it = pendingIcp_.erase(it);
+		}
+	}
+
+	void StereoFrontend::printIcpSummary()
+	{
+		collectFinishedIcp(true);
+		const std::size_t finished = icpConstraints_.size() +
+			std::accumulate(icpRejections_.begin(), icpRejections_.end(), std::size_t{0},
+							[](std::size_t sum, const auto& kv) { return sum + kv.second; });
+		std::cout << std::fixed << std::setprecision(1) << "Dense ICP: " << icpLaunched_ << " launched, "
+				  << icpConstraints_.size() << " accepted as BA edges";
+		if (!icpConstraints_.empty()) std::cout << " (mean rmse " << 100.0 * icpRmseSum_ / icpConstraints_.size() << " cm)";
+		if (finished > 0) std::cout << ", " << icpMillisecondsSum_ / finished << " ms per alignment on a worker thread";
+		std::cout << '\n';
+		for (const auto& [reason, count] : icpRejections_) std::cout << "  rejected: " << reason << " x" << count << '\n';
+	}
+
 	// ------------------------------------------------ local bundle adjustment
 
 	void StereoFrontend::runLocalBundleAdjustmentOnNewKeyframe(const StereoFrame& frame)
@@ -240,8 +311,9 @@ namespace RigVis
 		std::vector<ObservationProjection> before;
 		if (saveDebug) before = projectNewestKeyframeReobservations();
 
+		collectFinishedIcp();
 		lastBundleAdjustment_ = runLocalBundleAdjustment(keyframes_, mapPoints_, calibration_,
-														 localBundleAdjustmentOptions_);
+														 localBundleAdjustmentOptions_, &icpConstraints_);
 		const BundleAdjustmentSummary& ba = lastBundleAdjustment_;
 		if (!ba.ran) return;
 
@@ -253,12 +325,14 @@ namespace RigVis
 		stats_.bundleAdjustmentOutliers = ba.outliersRemoved;
 		stats_.bundleAdjustmentRmsBefore = ba.rmsNormalizedBefore;
 		stats_.bundleAdjustmentRmsAfter = ba.rmsNormalizedAfter;
+		stats_.icpEdgesInBundleAdjustment = ba.relativeConstraints - ba.relativeOutliers;
 
 		std::cout << std::fixed << std::setprecision(2)
 				  << "LocalBA kf " << keyframes_.back().id << ": free " << ba.freeKeyframes
 				  << " fixed " << ba.fixedKeyframes << " | points " << ba.points << " obs " << ba.observations
 				  << " | rms " << ba.rmsNormalizedBefore << " -> " << ba.rmsNormalizedAfter << " sigma"
-				  << " | outliers " << ba.outliersRemoved << " | " << ba.iterations << " it, "
+				  << " | outliers " << ba.outliersRemoved << " | icp " << (ba.relativeConstraints - ba.relativeOutliers)
+				  << " | " << ba.iterations << " it, "
 				  << std::setprecision(1) << ba.milliseconds << " ms\n";
 
 		if (saveDebug) {
@@ -847,6 +921,7 @@ namespace RigVis
 				computeDenseCloud(frame.left.image, frame.right.image, calibration_, denseOptions_, frame.color);
 			stats_.denseMilliseconds = std::chrono::duration<double, std::milli>(
 				std::chrono::steady_clock::now() - denseStart).count();
+			if (useDenseIcp_) launchDenseIcp(keyframes_.back().id);
 		}
 		localKeyframeIndices_.push_back(keyframes_.size() - 1);
 		if (localKeyframeIndices_.size() > localTrackingKeyframeCount_) {
@@ -1224,7 +1299,10 @@ namespace RigVis
 				stats_.matchMethod = "proj_wide";
 			}
 		}
-		if (!useProjectionSearch_ || matches.size() < projectionMinMatches_) {
+		// Still few matches after the wide search: the prediction is probably off
+		// (e.g. right after a kNN-recovered frame), so also try kNN and keep the
+		// larger set. A PnP on ~30 wide-window matches once derailed a whole run.
+		if (!useProjectionSearch_ || matches.size() < 3 * projectionMinMatches_) {
 			LocalMapMatches descriptorMatches = matchLocalMapByDescriptor(localMapPointIndices);
 			if (!useProjectionSearch_ || descriptorMatches.size() > matches.size()) {
 				matches = std::move(descriptorMatches);
